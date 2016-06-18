@@ -33,16 +33,22 @@ void Vehicle::setValue(uint8_t index, uint16_t val, bool transmitCanMessage)
 // val -> value to set
 void Vehicle::queueCanMessage(uint8_t type, uint8_t index, uint16_t val)
 {
-    if (canTxQueueLength == CAN_BUFFER_SIZE) {
-        // lose packets :-(
-        return;
-    }
+//    if (canTxQueueLength == CAN_BUFFER_SIZE) {
+//        // lose packets :-(
+//        return;
+//    }
     union CanFrame buf;
     buf.parts.type = type;
     buf.parts.index = index;
     buf.parts.val = val;
-    canTxQueue[canTxQueueLength] = buf.full;
-    canTxQueueLength++;
+    //canTxQueue[canTxQueueLength] = buf.full;
+    //canTxQueueLength++;
+    Serial.print("CAN");
+    Serial.print(type);
+    Serial.print(" ");
+    Serial.print(index);
+    Serial.print(" ");
+    Serial.println(val);
 }
 
 // // Sends a CAN message if there are any in the queue

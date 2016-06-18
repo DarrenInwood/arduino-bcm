@@ -4,22 +4,7 @@
 // Gives us named indexes in the vehicle state arrays
 #include "VehicleDefs.h"
 
-#define CAN_BUFFER_SIZE 32
-
-// Used to convert 32bit int <-> 4 bytes
-union CanFrame
-{
-   uint8_t data[4];
-   uint32_t full;
-   struct {
-      uint8_t type;
-      uint8_t index;
-      uint16_t val;
-   } parts;
-};
-
 // The Vehicle state machine.
-
 class Vehicle {
     public:
         // The state of the vehicle inputs
