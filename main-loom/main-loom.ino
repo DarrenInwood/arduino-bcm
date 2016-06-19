@@ -365,8 +365,6 @@ defineTaskLoop(copyInputsToState)
 // Arduino setup
 // --------------------------------------------------------------------
 
-#define NUM_TASKS    5
-
 void setup()
 {
   setupInputs();
