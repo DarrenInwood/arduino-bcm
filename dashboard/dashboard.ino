@@ -1,44 +1,106 @@
-/*
- * Pro mini programming with Uno:
- * Use settings Programmer = AVRISP mkII
- * Press reset button on pro mini shortly after IDE starts trying to upload.
- */
+#include <SCoop.h>
 
-//#define DEBUG 1
+#include "DashboardDefs.h"
 
-// Controls the 16-output 12-bit PWM chip
+// --------------------------------------------------------------------
+// Vehicle state
+// --------------------------------------------------------------------
+#include <VehicleDefs.h>
+#include <Vehicle.h>
+Vehicle vehicle;
+
+// --------------------------------------------------------------------
+// PCA9865 16-channel 12-bit PWM expander
+// --------------------------------------------------------------------
 // http://www.adafruit.com/products/815
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 
-// Tell our CAN bus interface which pins to use
+// --------------------------------------------------------------------
+// U-Blox NEO-6M GPS Receiver
+// --------------------------------------------------------------------
+//#include "UbloxGps.h"
+//UbloxGps ubloxGps;
+
+// --------------------------------------------------------------------
+// CAN bus interface
+// --------------------------------------------------------------------
+#define CAN_MSG_ID    0x07
+
+#include <SPI.h>
+#include <mcp_can.h>
+
 #define CAN_CS_PIN    4
 #define CAN_INT_PIN   2
+MCP_CAN CAN(CAN_CS_PIN);
 
-// Vehicle sets up CAN bus
-#include "Vehicle.h"
-Vehicle vehicle;
+#define CAN_TX_QUEUE_LEN  8
+defineFifo(canTxQueue, uint32_t, CAN_TX_QUEUE_LEN);
 
-// Semaphore to enable detecting update timing
-bool updateOutputsFlag = false;
+#define CAN_RX_QUEUE_LEN  8
+defineFifo(canRxQueue, uint32_t, CAN_RX_QUEUE_LEN);
 
-// Counter so we know how often to update the gauges (2Hz)
-#define UPDATE_GAUGE_MILLIS 500
-uint8_t updateGaugeCount = 0;
+// Flag used to indicate that there is something to read
+// on the CAN bus
+volatile bool canRxSema = false;
 
-// Counter so we know how often to update the Nextion screen (10Hz)
-// Also controls how often we check whether things are turned on/off
-#define UPDATE_DISPLAY_MILLIS 100
-uint8_t updateDisplayCount = 0;
+// Used to convert messages between various integer formats
+#define CAN_TYPE_SWITCH   0x00
+#define CAN_TYPE_VALUE    0x01
+union CanFrame
+{
+   uint8_t data[4];
+   uint32_t full;
+   struct {
+      uint8_t type;
+      uint8_t index;
+      uint16_t val;
+   } parts;
+};
+CanFrame buf;
 
-// Counter so we know how often to poll the GPS while we're running (4Hz)
-#define UPDATE_GPS_MILLIS 250
-uint32_t updateGpsCount = 0;
+/*
+ * Sets up the interrupt to trigger reading incoming CAN messages.
+ */
+void setupCanbus()
+{
+  // Interrupt on pin D2 triggere ISR
+  attachInterrupt(
+    digitalPinToInterrupt(CAN_INT_PIN),
+    canInterrupt,
+    LOW
+  );
+  // Start the CAN bus at 100Kbps
+  CAN.begin(CAN_100KBPS);
+}
 
-// Tells us which input is connected where
-#include "DashboardDefs.h"
+/*
+ * Add a switch type CAN message to the transmit queue
+ */
+void queueCanSwitch(uint8_t index)
+{
+  buf.parts.type = CAN_TYPE_SWITCH;
+  buf.parts.index = index;
+  buf.parts.val = (uint16_t)vehicle.switches[index];
+  canTxQueue.put(&(buf.full));
+}
+
+/*
+ * Add a value type CAN message to the transmit queue
+ */
+void queueCanValue(uint8_t index)
+{
+  buf.parts.type = CAN_TYPE_VALUE;
+  buf.parts.index = index;
+  buf.parts.val = vehicle.values[index];
+  canTxQueue.put(&(buf.full));
+}
+
+// --------------------------------------------------------------------
+// Dashboard state
+// --------------------------------------------------------------------
 
 // Set up our initial state
 struct Dashboard {
@@ -73,131 +135,73 @@ Dashboard dashboard = {
     // Display values
 };
 
-#include "UbloxGps.h"
-UbloxGps ubloxGps;
+// --------------------------------------------------------------------
+// ISRs
+// --------------------------------------------------------------------
 
-// Set up the application
-void setup()
+/*
+ * ISR:  Pin change on pin D2 (INT0) means CAN interrupt. Signal
+ * the CAN receive thread to process it.
+ */
+void canInterrupt()
 {
-  Serial.begin(9600);
-
-  // show the Ford logo for 3s
-  String cmd = "";
-
-  cmd = "dim 100";
-  sendNextionCommand(cmd.c_str());
-
-  // show ford logo
-//  cmd = "page 0";
-//  sendNextionCommand(cmd.c_str());
-//  cmd = "ref 0";
-//  sendNextionCommand(cmd.c_str());
-
-  cmd = "page 1";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis indl,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis brake,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis high,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis indr,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis clt,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis bat,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis oil,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "vis fuel,0";
-  sendNextionCommand(cmd.c_str());
-  cmd = "ref 0";
-  sendNextionCommand(cmd.c_str());
-
-    setupOutputs();
-
-    // Trigger an interrupt 
-    OCR0A = 0xAF;  // when Timer0 equals this value, A timer interrupt is triggered
-    TIMSK0 |= _BV(OCIE0A); // Enable the Timer0 compare interrupt
-
-    enableWakeupInterrupts();
-
-    // set up CAN bus etc
-    vehicle.setup();
-
-    // stay on!
-    vehicle.switches[SW_ACC] = true;
-
-    // GPS setup
-    ubloxGps.setup();
+  // Tell the read task to read.
+  canRxSema = true;
 }
 
-// Set the things that can wake us back up again from sleep mode
-void enableWakeupInterrupts() {
-    attachInterrupt(digitalPinToInterrupt(CAN_INT_PIN), wakeup_ISR, LOW);
+// --------------------------------------------------------------------
+// Tasks
+// --------------------------------------------------------------------
+
+/*
+ * TASK:  When there's a CAN message waiting to be read, read it
+ * and add it to the receieve queue.
+ */
+uint8_t len;
+defineTaskLoop(readCanMessage, 64)
+{
+  // Wait until the semaphore is set
+  // (ie. when the interrupt handler has set it)
+  sleepUntil(canRxSema);
+  if (CAN_MSGAVAIL == CAN.checkReceive()) {
+    CAN.readMsgBuf(&len, buf.data);
+    canRxQueue.put(&(buf.full));
+  }
 }
 
-void setupOutputs()
+/*
+ * TASK:  When there's a message in the CAN receive buffer, process it.
+ */
+defineTaskLoop(processCanRxQueue, 64)
 {
-    pwm.begin();
-    pwm.setPWMFreq(1000);  // This is the maximum PWM frequency
-
-    // Set output pin modes
-    pinMode(DOUT_METER_RELAY, OUTPUT);
-    pinMode(DOUT_BACKLIGHT_RELAY, OUTPUT);
-    pinMode(DOUT_GPS_RX, OUTPUT);
-    pinMode(DOUT_GPS_TX, OUTPUT);
-    pinMode(DOUT_TACHO, OUTPUT);
-
-    // Default settings
-    digitalWrite(DOUT_METER_RELAY, 1);     // 1=off (relay module)
-    digitalWrite(DOUT_BACKLIGHT_RELAY, 1); // 1=off (relay module)
-}
-
-// Timer compare interrupt has happened
-SIGNAL(TIMER0_COMPA_vect) 
-{
-    updateOutputsFlag = true;
-}
-
-// Wake up interrupt handler
-void wakeup_ISR()
-{
-    // noop - loop() will take care of everything
-}
-
-void loop()
-{
-    // Update things on a schedule
-    if (updateOutputsFlag) {
-        updateOutputsFlag = false; // triggers every ms
-        
-        updateGaugeCount++;
-        if (updateGaugeCount > UPDATE_GAUGE_MILLIS) {
-            updateGaugeCount = 0;
-            updateGauges();
-        }
-
-        updateDisplayCount++;
-        if (updateDisplayCount > UPDATE_DISPLAY_MILLIS) {
-            updateDisplayCount = 0;
-            updateDisplay();
-        }
-
-        updateGpsCount++;
-        if (updateGpsCount > UPDATE_GPS_MILLIS) {
-            updateGpsCount = 0;
-            updateGps();
-        }
+  if (canRxQueue.get(&(buf.full))) {
+    // Set the new state on the vehicle state
+    switch (buf.parts.type) {
+       case CAN_TYPE_SWITCH:
+           // Don't send a can message if we changed state
+           vehicle.setSwitch(buf.parts.index, buf.parts.val);
+       break;
+       case CAN_TYPE_VALUE:
+           // Don't send a can message if we changed state
+           vehicle.setValue(buf.parts.index, buf.parts.val);
+       break;
     }
-    
-    // Let the vehicle handle comms, sleep etc
-    vehicle.process();
+  }
+}
+
+/*
+ * TASK:  When there's a message in the CAN transmit buffer, send it.
+ */
+defineTaskLoop(processCanTxQueue, 64)
+{
+  if (canTxQueue.get(&(buf.full))) {
+    CAN.sendMsgBuf(CAN_MSG_ID, 0, sizeof(buf.data), buf.data);
+  }
 }
 
 // Take the vehicle state and send it to the display
 // Also takes care of how often things are turned on/off
-void updateDisplay()
+defineTaskLoop(updateDisplay, 128)
 {
     String cmd = "";
     String on = "1";
@@ -289,9 +293,11 @@ void updateDisplay()
     // Refresh the screen
     cmd = "ref 0";
     sendNextionCommand(cmd.c_str());
+
+    sleep(100);
 }
 
-void updateGauges()
+defineTaskLoop(updateGauges, 128)
 {
     // IG means 'turn on the gauges'
     if (vehicle.switches[SW_IGNITION] != dashboard.gaugesOn) {
@@ -325,15 +331,40 @@ void updateGauges()
         clt = min(4095, clt);        
         pwm.setPWM(AOUT_CLT, 0, clt);
     }
+
+    sleep(500);
 }
 
-void updateGps()
-{
-    ubloxGps.process();
+//defineTaskLoop(updateGps)
+//{
+//    ubloxGps.process();
+//
+//    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
+//        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
+//    }
+//
+//    sleep(250);
+//}
 
-    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
-        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
-    }
+// --------------------------------------------------------------------
+// Arduino setup
+// --------------------------------------------------------------------
+
+void setupOutputs()
+{
+    pwm.begin();
+    pwm.setPWMFreq(1000);  // This is the maximum PWM frequency
+
+    // Set output pin modes
+    pinMode(DOUT_METER_RELAY, OUTPUT);
+    pinMode(DOUT_BACKLIGHT_RELAY, OUTPUT);
+    pinMode(DOUT_GPS_RX, OUTPUT);
+    pinMode(DOUT_GPS_TX, OUTPUT);
+    pinMode(DOUT_TACHO, OUTPUT);
+
+    // Default settings
+    digitalWrite(DOUT_METER_RELAY, 1);     // 1=off (relay module)
+    digitalWrite(DOUT_BACKLIGHT_RELAY, 1); // 1=off (relay module)
 }
 
 // Sends a command to the Nextion display
@@ -343,3 +374,60 @@ void sendNextionCommand(const char* cmd){
   Serial.write(0xFF);
   Serial.write(0xFF);
 }
+
+void setupNextion()
+{
+  Serial.begin(9600);
+  
+  // show the Ford logo for 3s
+  String cmd = "";
+
+  cmd = "dim 100";
+  sendNextionCommand(cmd.c_str());
+
+  // show ford logo
+//  cmd = "page 0";
+//  sendNextionCommand(cmd.c_str());
+//  cmd = "ref 0";
+//  sendNextionCommand(cmd.c_str());
+
+  cmd = "page 1";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis indl,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis brake,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis high,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis indr,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis clt,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis bat,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis oil,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "vis fuel,0";
+  sendNextionCommand(cmd.c_str());
+  cmd = "ref 0";
+  sendNextionCommand(cmd.c_str());
+}
+
+void setup()
+{
+  // Nextion display is on hardware serial at 9600 baud
+  setupNextion();
+  // Set up hardware outputs 
+  setupOutputs();
+  // Set up CAN bus comms
+  setupCanbus();
+
+  mySCoop.start();
+}
+
+void loop()
+{
+  // Empty
+}
+
+

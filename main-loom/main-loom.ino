@@ -138,7 +138,7 @@ void canInterrupt()
  * and add it to the receieve queue.
  */
 uint8_t len;
-defineTaskLoop(readCanMessage)
+defineTaskLoop(readCanMessage, 64)
 {
   // Wait until the semaphore is set
   // (ie. when the interrupt handler has set it)
@@ -152,7 +152,7 @@ defineTaskLoop(readCanMessage)
 /*
  * TASK:  When there's a message in the CAN receive buffer, process it.
  */
-defineTaskLoop(processCanRxQueue)
+defineTaskLoop(processCanRxQueue, 64)
 {
   if (canRxQueue.get(&(buf.full))) {
     // Set the new state on the vehicle state
@@ -172,7 +172,7 @@ defineTaskLoop(processCanRxQueue)
 /*
  * TASK:  When there's a message in the CAN transmit buffer, send it.
  */
-defineTaskLoop(processCanTxQueue)
+defineTaskLoop(processCanTxQueue, 64)
 {
   if (canTxQueue.get(&(buf.full))) {
     CAN.sendMsgBuf(CAN_MSG_ID, 0, sizeof(buf.data), buf.data);
@@ -182,7 +182,7 @@ defineTaskLoop(processCanTxQueue)
 /*
  * TASK:  Debounce physical inputs.
  */
-defineTaskLoop(processInputs)
+defineTaskLoop(processInputs, 64)
 {
   // Debounce D8/D9/D10
   debouncePB.ButtonProcess(PINB);
@@ -201,7 +201,7 @@ defineTaskLoop(processInputs)
  */
 volatile bool debouncedValue;
 volatile bool debouncedValue2;
-defineTaskLoop(copyInputsToState)
+defineTaskLoop(copyInputsToState, 128)
 {
   debouncedValue = debouncePD.ButtonCurrent(DIN_TURNLEFT);
   debouncedValue2 = debouncePD.ButtonCurrent(DIN_TURNRIGHT);
