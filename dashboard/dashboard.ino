@@ -21,8 +21,10 @@ Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 // --------------------------------------------------------------------
 // U-Blox NEO-6M GPS Receiver
 // --------------------------------------------------------------------
-//#include "UbloxGps.h"
-//UbloxGps ubloxGps;
+#include "SoftwareSerial.h"
+#include "TinyGPS++.h"
+#include "UbloxGps.h"
+UbloxGps ubloxGps;
 
 // --------------------------------------------------------------------
 // CAN bus interface
@@ -335,16 +337,16 @@ defineTaskLoop(updateGauges, 128)
     sleep(500);
 }
 
-//defineTaskLoop(updateGps)
-//{
-//    ubloxGps.process();
-//
-//    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
-//        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
-//    }
-//
-//    sleep(250);
-//}
+defineTaskLoop(updateGps, 64)
+{
+    ubloxGps.process();
+
+    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
+        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
+    }
+
+    sleep(250);
+}
 
 // --------------------------------------------------------------------
 // Arduino setup
