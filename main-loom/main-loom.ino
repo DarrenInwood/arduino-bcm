@@ -44,7 +44,7 @@ union CanData
 void setupCanbus(void)
 {
   Serial.begin(115200);  
-  CAN.begin(CAN_BPS_100K);
+  CAN.begin(CAN_BPS_500K);
 }
 
 /*
@@ -65,14 +65,14 @@ void queueCanMessage(uint8_t swtype, uint8_t index)
   can_message.valid = true;
   can_message.rtr = 0;
   can_message.extended = CAN_EXTENDED_FRAME;
-  can_message.length = 2;
+  can_message.length = 4;
 
   switch (swtype) {
     case CAN_TYPE_SWITCH:
       messageData.data[0] = 0x00;
       messageData.data[1] = 0x00;
       messageData.data[2] = 0x00;
-      messageData.data[3] = (uint8_t)vehicle.switches[index];
+      messageData.data[3] = (vehicle.switches[index] ? 0x01 : 0x00);
     break;
     case CAN_TYPE_VALUE:
       messageData.full = (uint32_t)vehicle.switches[index];
@@ -85,6 +85,7 @@ void queueCanMessage(uint8_t swtype, uint8_t index)
   
   CAN.write(can_message);
 
+  Serial.print("send ");
   Serial.print(millis());
   Serial.print(F(",0x"));
   Serial.print(can_message.id, HEX); //display message ID
@@ -94,8 +95,11 @@ void queueCanMessage(uint8_t swtype, uint8_t index)
   Serial.print(can_message.extended); //display message EID
   Serial.print(',');
   Serial.print(can_message.data[0], HEX);
+  Serial.print(':');
   Serial.print(can_message.data[1], HEX);
+  Serial.print(':');
   Serial.print(can_message.data[2], HEX);
+  Serial.print(':');
   Serial.println(can_message.data[3], HEX);
 }
 
@@ -105,44 +109,74 @@ void queueCanMessage(uint8_t swtype, uint8_t index)
  */
 void processCanMessage()
 {
-  static CAN_Frame message; // Create message object to use CAN message structure
+  CAN_Frame message; // Create message object to use CAN message structure
   CanMessageId messageId;
   CanData messageData;
-  if (CAN.available() != true) // Check to see if a valid message has been received.
-  {
-    return; // noop
-  }
-  message = CAN.read();
-  if (message.valid != 0) {
-    return; // discard invalid messages 
-  }
-  if (message.extended != CAN_EXTENDED_FRAME) {
-    return; // discard standard frame size messages
-  }
-  messageId.full = message.id;
-  messageData.data[0] = message.data[0];
-  messageData.data[1] = message.data[1];
-  messageData.data[2] = message.data[2];
-  messageData.data[3] = message.data[3];
-  if (message.rtr == 1) {
-    // We've requested a value
-    queueCanMessage(messageId.parts.type, messageId.parts.index);
-    return;
-  }
-  switch (messageId.parts.header) {
-    // Normal message
-    case CAN_MSG_HEADER:
-      switch (messageId.parts.type)
+  if (CAN.available() == true) { // Check to see if a valid message has been received.
+    message = CAN.read();
+  
+    Serial.print("receive ");
+    Serial.print(millis());
+    Serial.print(F(",0x"));
+    Serial.print(message.id, HEX); //display message ID
+    Serial.print(',');
+    Serial.print(message.rtr); //display message RTR
+    Serial.print(',');
+    Serial.print(message.extended); //display message EID
+    Serial.print(',');
+    if (message.rtr == 1)
+    {
+      Serial.print(F(" REMOTE REQUEST MESSAGE ")); //technically if its RTR frame/message it will not have data So display this
+    }
+    else
+    {
+      Serial.print(message.length, HEX); //display message length
+      for (byte i = 0; i < message.length; i++)
       {
-        case CAN_TYPE_SWITCH:
-          vehicle.switches[messageId.parts.index] = (messageData.data[3] == 0x01);
-        break;
-        case CAN_TYPE_VALUE:
-          vehicle.values[messageId.parts.index] = messageData.full;
-        break;
+        Serial.print(',');
+        if (message.data[i] < 0x10) // If the data is less than 10 hex it will assign a zero to the front as leading zeros are ignored...
+        {
+          Serial.print('0');
+        }
+        Serial.print(message.data[i], HEX); //display data based on length
       }
-    break;
-    // No default - other messages are discarded
+    }
+    Serial.println();
+  
+    if (message.valid != 1) {
+      return; // discard invalid messages 
+    }
+    if (message.extended != CAN_EXTENDED_FRAME) {
+      return; // discard standard frame size messages
+    }
+    messageId.full = message.id;
+    messageData.data[0] = message.data[0];
+    messageData.data[1] = message.data[1];
+    messageData.data[2] = message.data[2];
+    messageData.data[3] = message.data[3];
+    if (message.rtr == 1) {
+      // We've requested a value
+      queueCanMessage(messageId.parts.type, messageId.parts.index);
+      return;
+    }
+    switch (messageId.parts.header) {
+      // Normal message
+      case CAN_MSG_HEADER:
+        switch (messageId.parts.type)
+        {
+          case CAN_TYPE_SWITCH:
+            vehicle.switches[messageId.parts.index] = (messageData.data[3] == 0x01);
+          break;
+          case CAN_TYPE_VALUE:
+            vehicle.values[messageId.parts.index] = messageData.full;
+          break;
+        }
+      break;
+      default:
+        // No default - other messages are discarded
+        return;
+      break;
+    }
   }
 }
 
@@ -157,11 +191,15 @@ PCF8574 expander2(0x21);
 // --------------------------------------------------------------------
 // Digital input debouncing
 // --------------------------------------------------------------------
-#include "button_debounce.h"
+#include <button_debounce.h>
+//Debouncer debouncePB(0x00); // Constructor takes 'pulledUpPins' - ie. normally high = 1, ie. "on" = 0V before 4049
+//Debouncer debouncePD(DIN_TURNLEFT & DIN_TURNRIGHT);
+//Debouncer debouncePCF1(DIN_BRAKESWITCH & DIN_FUELLOW & DIN_CHOKE & DIN_COOLANTLOW & DIN_OILPRESSURELOW & DIN_WIPERINT);
+//Debouncer debouncePCF2(DIN_WASHERMOTOR & DIN_WIPERLOW & DIN_WIPERHIGH & DIN_UNKNOWN);
 Debouncer debouncePB(0x00); // Constructor takes 'pulledUpPins' - ie. normally high = 1, ie. "on" = 0V before 4049
-Debouncer debouncePD(DIN_TURNLEFT & DIN_TURNRIGHT);
-Debouncer debouncePCF1(DIN_BRAKESWITCH & DIN_FUELLOW & DIN_CHOKE & DIN_COOLANTLOW & DIN_OILPRESSURELOW & DIN_WIPERINT);
-Debouncer debouncePCF2(DIN_WASHERMOTOR & DIN_WIPERLOW & DIN_WIPERHIGH & DIN_UNKNOWN);
+Debouncer debouncePD(0x00);
+Debouncer debouncePCF1(0x00);
+Debouncer debouncePCF2(0x00);
 
 // --------------------------------------------------------------------
 // Set up inputs etc
@@ -173,7 +211,15 @@ void setupInputs() {
   pinMode(PIN_ACC, INPUT);        // D8 <- Accessories key switch
   pinMode(PIN_IGNITION, INPUT);   // D9 <- IG (Ignition key switch / engine run)
   pinMode(PIN_PARKLIGHTS, INPUT); // D10 <- Park lights
+
+  expander1.begin();
+  expander2.begin();
 }
+
+uint8_t last_PINB = 0;
+uint8_t last_PIND = 0;
+uint8_t last_expander1 = 0;
+uint8_t last_expander2 = 0;
 
 /*
  * TASK:  Debounce physical inputs.
@@ -188,6 +234,27 @@ void debounceInputs()
   debouncePCF1.ButtonProcess(expander1.read8());
   // Debounce PCF8574 #2
   debouncePCF2.ButtonProcess(expander2.read8());
+
+  if (PINB != last_PINB) {
+    last_PINB = PINB;
+    Serial.print("PINB: ");
+    Serial.println(PINB);
+  }
+  if (PIND != last_PIND) {
+    last_PIND = PIND;
+    Serial.print("PIND: ");
+    Serial.println(last_PIND);
+  }
+  if (expander1.read8() != last_expander1) {
+    last_expander1 = expander1.read8();
+    Serial.print("expander1: ");
+    Serial.println(last_expander1);
+  }
+  if (expander2.read8() != last_expander2) {
+    last_expander2 = expander2.read8();
+    Serial.print("expander2: ");
+    Serial.println(last_expander2);
+  }
 }
 
 /*

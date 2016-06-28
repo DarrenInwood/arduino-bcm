@@ -45,5 +45,3 @@
 #define ADC_COOLANT         A2
 
 #endif
-
-

@@ -1,5 +1,3 @@
-#include <SCoop.h>
-
 #include "DashboardDefs.h"
 
 // --------------------------------------------------------------------
@@ -18,86 +16,182 @@ Vehicle vehicle;
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 
-// --------------------------------------------------------------------
-// U-Blox NEO-6M GPS Receiver
-// --------------------------------------------------------------------
-#include "SoftwareSerial.h"
-#include "TinyGPS++.h"
-#include "UbloxGps.h"
-UbloxGps ubloxGps;
+//// --------------------------------------------------------------------
+//// U-Blox NEO-6M GPS Receiver
+//// --------------------------------------------------------------------
+//#include "SoftwareSerial.h"
+//#include "TinyGPS++.h"
+//#include "UbloxGps.h"
+//UbloxGps ubloxGps;
 
 // --------------------------------------------------------------------
-// CAN bus interface
+// CAN bus communications
 // --------------------------------------------------------------------
-#define CAN_MSG_ID    0x07
-
+#include <CAN.h>
 #include <SPI.h>
-#include <mcp_can.h>
 
-#define CAN_CS_PIN    4
-#define CAN_INT_PIN   2
-MCP_CAN CAN(CAN_CS_PIN);
+#define CAN_MSG_HEADER  0x02DA
+#define CAN_TYPE_SWITCH 0x00
+#define CAN_TYPE_VALUE  0x01
 
-#define CAN_TX_QUEUE_LEN  8
-defineFifo(canTxQueue, uint32_t, CAN_TX_QUEUE_LEN);
-
-#define CAN_RX_QUEUE_LEN  8
-defineFifo(canRxQueue, uint32_t, CAN_RX_QUEUE_LEN);
-
-// Flag used to indicate that there is something to read
-// on the CAN bus
-volatile bool canRxSema = false;
-
-// Used to convert messages between various integer formats
-#define CAN_TYPE_SWITCH   0x00
-#define CAN_TYPE_VALUE    0x01
-union CanFrame
+// Allows us to easily convert between the CAN message ID
+// and the intent of the message
+union CanMessageId
 {
    uint8_t data[4];
    uint32_t full;
    struct {
-      uint8_t type;
       uint8_t index;
-      uint16_t val;
+      uint8_t type;
+      uint16_t header;
    } parts;
 };
-CanFrame buf;
 
-/*
- * Sets up the interrupt to trigger reading incoming CAN messages.
- */
-void setupCanbus()
+// Allows us to easily convert between various interpretations
+// of values sent via CAN bus
+union CanData
 {
-  // Interrupt on pin D2 triggere ISR
-  attachInterrupt(
-    digitalPinToInterrupt(CAN_INT_PIN),
-    canInterrupt,
-    LOW
-  );
-  // Start the CAN bus at 100Kbps
-  CAN.begin(CAN_100KBPS);
+   uint8_t data[4];
+   uint32_t full;
+};
+
+void setupCanbus(void)
+{
+  CAN.begin(CAN_BPS_500K);
 }
 
 /*
  * Add a switch type CAN message to the transmit queue
  */
-void queueCanSwitch(uint8_t index)
+void queueCanMessage(uint8_t swtype, uint8_t index)
 {
-  buf.parts.type = CAN_TYPE_SWITCH;
-  buf.parts.index = index;
-  buf.parts.val = (uint16_t)vehicle.switches[index];
-  canTxQueue.put(&(buf.full));
+  static CAN_Frame can_message;
+  CanMessageId messageId;
+  CanData messageData;
+
+  // Encode the CAN message ID
+  messageId.parts.header = CAN_MSG_HEADER;
+  messageId.parts.type = swtype;
+  messageId.parts.index = index;
+
+  can_message.id = messageId.full;
+  can_message.valid = true;
+  can_message.rtr = 0;
+  can_message.extended = CAN_EXTENDED_FRAME;
+  can_message.length = 4;
+
+  switch (swtype) {
+    case CAN_TYPE_SWITCH:
+      messageData.data[0] = 0x00;
+      messageData.data[1] = 0x00;
+      messageData.data[2] = 0x00;
+      messageData.data[3] = (vehicle.switches[index] ? 0x01 : 0x00);
+    break;
+    case CAN_TYPE_VALUE:
+      messageData.full = (uint32_t)vehicle.switches[index];
+    break;
+  }
+  can_message.data[0] = messageData.data[0];
+  can_message.data[1] = messageData.data[1];
+  can_message.data[2] = messageData.data[2];
+  can_message.data[3] = messageData.data[3];
+  
+  CAN.write(can_message);
+
+//  Serial.print("send ");
+//  Serial.print(millis());
+//  Serial.print(F(",0x"));
+//  Serial.print(can_message.id, HEX); //display message ID
+//  Serial.print(',');
+//  Serial.print(can_message.rtr); //display message RTR
+//  Serial.print(',');
+//  Serial.print(can_message.extended); //display message EID
+//  Serial.print(',');
+//  Serial.print(can_message.data[0], HEX);
+//  Serial.print(':');
+//  Serial.print(can_message.data[1], HEX);
+//  Serial.print(':');
+//  Serial.print(can_message.data[2], HEX);
+//  Serial.print(':');
+//  Serial.println(can_message.data[3], HEX);
+
 }
 
-/*
- * Add a value type CAN message to the transmit queue
+/* 
+ * Fetch and process any waiting receieved CAN messages.
+ * Ensure this is called every 1ms so as not to lose packets.
  */
-void queueCanValue(uint8_t index)
+void processCanMessage()
 {
-  buf.parts.type = CAN_TYPE_VALUE;
-  buf.parts.index = index;
-  buf.parts.val = vehicle.values[index];
-  canTxQueue.put(&(buf.full));
+  CAN_Frame message; // Create message object to use CAN message structure
+  CanMessageId messageId;
+  CanData messageData;
+  if (CAN.available() == true) { // Check to see if a valid message has been received.
+    message = CAN.read();
+  
+//    Serial.print("receive ");
+//    Serial.print(millis());
+//    Serial.print(F(",0x"));
+//    Serial.print(message.id, HEX); //display message ID
+//    Serial.print(',');
+//    Serial.print(message.rtr); //display message RTR
+//    Serial.print(',');
+//    Serial.print(message.extended); //display message EID
+//    Serial.print(',');
+//    if (message.rtr == 1)
+//    {
+//      Serial.print(F(" REMOTE REQUEST MESSAGE ")); //technically if its RTR frame/message it will not have data So display this
+//    }
+//    else
+//    {
+//      Serial.print(message.length, HEX); //display message length
+//      for (byte i = 0; i < message.length; i++)
+//      {
+//        Serial.print(',');
+//        if (message.data[i] < 0x10) // If the data is less than 10 hex it will assign a zero to the front as leading zeros are ignored...
+//        {
+//          Serial.print('0');
+//        }
+//        Serial.print(message.data[i], HEX); //display data based on length
+//      }
+//    }
+//    Serial.println();
+  
+    if (message.valid != 1) {
+      return; // discard invalid messages 
+    }
+    if (message.extended != CAN_EXTENDED_FRAME) {
+      return; // discard standard frame size messages
+    }
+    messageId.full = message.id;
+    messageData.data[0] = message.data[0];
+    messageData.data[1] = message.data[1];
+    messageData.data[2] = message.data[2];
+    messageData.data[3] = message.data[3];
+    if (message.rtr == 1) {
+      // We've requested a value
+      queueCanMessage(messageId.parts.type, messageId.parts.index);
+      return;
+    }
+    switch (messageId.parts.header) {
+      // Normal message
+      case CAN_MSG_HEADER:
+        switch (messageId.parts.type)
+        {
+          case CAN_TYPE_SWITCH:
+            vehicle.switches[messageId.parts.index] = (messageData.data[3] == 0x01);
+          break;
+          case CAN_TYPE_VALUE:
+            vehicle.values[messageId.parts.index] = messageData.full;
+          break;
+        }
+      break;
+      default:
+        // No default - other messages are discarded
+        return;
+      break;
+    }
+  }
 }
 
 // --------------------------------------------------------------------
@@ -138,72 +232,13 @@ Dashboard dashboard = {
 };
 
 // --------------------------------------------------------------------
-// ISRs
-// --------------------------------------------------------------------
-
-/*
- * ISR:  Pin change on pin D2 (INT0) means CAN interrupt. Signal
- * the CAN receive thread to process it.
- */
-void canInterrupt()
-{
-  // Tell the read task to read.
-  canRxSema = true;
-}
-
-// --------------------------------------------------------------------
 // Tasks
 // --------------------------------------------------------------------
 
-/*
- * TASK:  When there's a CAN message waiting to be read, read it
- * and add it to the receieve queue.
- */
-uint8_t len;
-defineTaskLoop(readCanMessage, 64)
-{
-  // Wait until the semaphore is set
-  // (ie. when the interrupt handler has set it)
-  sleepUntil(canRxSema);
-  if (CAN_MSGAVAIL == CAN.checkReceive()) {
-    CAN.readMsgBuf(&len, buf.data);
-    canRxQueue.put(&(buf.full));
-  }
-}
-
-/*
- * TASK:  When there's a message in the CAN receive buffer, process it.
- */
-defineTaskLoop(processCanRxQueue, 64)
-{
-  if (canRxQueue.get(&(buf.full))) {
-    // Set the new state on the vehicle state
-    switch (buf.parts.type) {
-       case CAN_TYPE_SWITCH:
-           // Don't send a can message if we changed state
-           vehicle.setSwitch(buf.parts.index, buf.parts.val);
-       break;
-       case CAN_TYPE_VALUE:
-           // Don't send a can message if we changed state
-           vehicle.setValue(buf.parts.index, buf.parts.val);
-       break;
-    }
-  }
-}
-
-/*
- * TASK:  When there's a message in the CAN transmit buffer, send it.
- */
-defineTaskLoop(processCanTxQueue, 64)
-{
-  if (canTxQueue.get(&(buf.full))) {
-    CAN.sendMsgBuf(CAN_MSG_ID, 0, sizeof(buf.data), buf.data);
-  }
-}
 
 // Take the vehicle state and send it to the display
 // Also takes care of how often things are turned on/off
-defineTaskLoop(updateDisplay, 128)
+void updateDisplay()
 {
     String cmd = "";
     String on = "1";
@@ -295,11 +330,9 @@ defineTaskLoop(updateDisplay, 128)
     // Refresh the screen
     cmd = "ref 0";
     sendNextionCommand(cmd.c_str());
-
-    sleep(100);
 }
 
-defineTaskLoop(updateGauges, 128)
+void updateGauges()
 {
     // IG means 'turn on the gauges'
     if (vehicle.switches[SW_IGNITION] != dashboard.gaugesOn) {
@@ -333,20 +366,18 @@ defineTaskLoop(updateGauges, 128)
         clt = min(4095, clt);        
         pwm.setPWM(AOUT_CLT, 0, clt);
     }
-
-    sleep(500);
 }
 
-defineTaskLoop(updateGps, 64)
-{
-    ubloxGps.process();
-
-    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
-        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
-    }
-
-    sleep(250);
-}
+//defineTaskLoop(updateGps, 64)
+//{
+//    ubloxGps.process();
+//
+//    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
+//        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
+//    }
+//
+//    sleep(250);
+//}
 
 // --------------------------------------------------------------------
 // Arduino setup
@@ -369,7 +400,7 @@ void setupOutputs()
     digitalWrite(DOUT_BACKLIGHT_RELAY, 1); // 1=off (relay module)
 }
 
-// Sends a command to the Nextion display
+//// Sends a command to the Nextion display
 void sendNextionCommand(const char* cmd){
   Serial.print(cmd);
   Serial.write(0xFF);
@@ -423,13 +454,14 @@ void setup()
   setupOutputs();
   // Set up CAN bus comms
   setupCanbus();
-
-  mySCoop.start();
 }
 
 void loop()
 {
-  // Empty
+  processCanMessage();
+  updateDisplay();
+//  updateGauges();
+  delay(1000);
 }
 
 
