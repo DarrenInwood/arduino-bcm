@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include "DashboardDefs.h"
 
 // --------------------------------------------------------------------
@@ -16,13 +17,22 @@ Vehicle vehicle;
 
 Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver(0x40);
 
-//// --------------------------------------------------------------------
-//// U-Blox NEO-6M GPS Receiver
-//// --------------------------------------------------------------------
-//#include "SoftwareSerial.h"
-//#include "TinyGPS++.h"
-//#include "UbloxGps.h"
-//UbloxGps ubloxGps;
+// --------------------------------------------------------------------
+// U-Blox NEO-6M GPS Receiver
+// --------------------------------------------------------------------
+#include "NMEAGPS.h"
+#include <NeoSWSerial.h>
+#include "GPSport.h"
+#include "Streamers.h"
+
+static NMEAGPS   gps;
+static gps_fix  fix_data;
+
+void setupGps()
+{
+  gps_port.attachInterrupt( GPSisr );
+  gps_port.begin( 9600 );
+}
 
 // --------------------------------------------------------------------
 // CAN bus communications
@@ -232,6 +242,16 @@ Dashboard dashboard = {
 };
 
 // --------------------------------------------------------------------
+// ISRs
+// --------------------------------------------------------------------
+
+static void GPSisr( uint8_t c )
+{
+  gps.handle( c );
+}
+
+
+// --------------------------------------------------------------------
 // Tasks
 // --------------------------------------------------------------------
 
@@ -248,8 +268,6 @@ void updateDisplay()
     if (vehicle.switches[SW_IGNITION] != dashboard.gaugesOn) {
         dashboard.gaugesOn = vehicle.switches[SW_IGNITION];
         digitalWrite(DOUT_METER_RELAY, !dashboard.gaugesOn); // 0=on
-        Serial.print("Gauges: ");
-        Serial.println(dashboard.gaugesOn);
     }
     // IG means 'turn on the screen'
     if (vehicle.switches[SW_IGNITION] != dashboard.displayOn) {
@@ -328,8 +346,8 @@ void updateDisplay()
     }
 
     // Refresh the screen
-    cmd = "ref 0";
-    sendNextionCommand(cmd.c_str());
+//    cmd = "ref 0";
+//    sendNextionCommand(cmd.c_str());
 }
 
 void updateGauges()
@@ -338,8 +356,6 @@ void updateGauges()
     if (vehicle.switches[SW_IGNITION] != dashboard.gaugesOn) {
         dashboard.gaugesOn = vehicle.switches[SW_IGNITION];
         digitalWrite(DOUT_METER_RELAY, !dashboard.gaugesOn); // 0=on
-        Serial.print("Gauges: ");
-        Serial.println(dashboard.gaugesOn);
     }
     // IG means 'turn on the screen'
     if (vehicle.switches[SW_IGNITION] != dashboard.displayOn) {
@@ -368,16 +384,17 @@ void updateGauges()
     }
 }
 
-//defineTaskLoop(updateGps, 64)
-//{
-//    ubloxGps.process();
-//
-//    if (vehicle.values[VAL_SPEED] != ubloxGps.speed) {
-//        vehicle.setValue(VAL_SPEED, ubloxGps.speed);
-//    }
-//
-//    sleep(250);
-//}
+void updateGps()
+{
+    String cmd = "speed.val=";
+    float speed;
+    while (gps.available()) {
+        fix_data = gps.read();
+        speed = fix_data.speed_kph() * 100;
+        cmd = cmd + String(speed);
+        sendNextionCommand(cmd.c_str());
+    }
+}
 
 // --------------------------------------------------------------------
 // Arduino setup
@@ -448,6 +465,8 @@ void setupNextion()
 
 void setup()
 {
+  // Ublox GPS on pins 7/8 at 9600 baud
+  setupGps();
   // Nextion display is on hardware serial at 9600 baud
   setupNextion();
   // Set up hardware outputs 
@@ -456,12 +475,15 @@ void setup()
   setupCanbus();
 }
 
+uint32_t lastTime = millis();
 void loop()
 {
   processCanMessage();
-  updateDisplay();
-//  updateGauges();
-  delay(1000);
+  updateGps();
+  if ((millis() - lastTime) > 1000) {
+    updateDisplay();
+    lastTime = millis();  
+  }
 }
 
 
